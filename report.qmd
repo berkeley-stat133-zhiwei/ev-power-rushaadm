@@ -1,34 +1,203 @@
 ---
 title: "EV Power - Lab 4 Project Report"
 format: typst
+execute:
+  echo: false 
 ---
-
-# Example Solution 1
-
 ## **Part 0: libraries**
 
 ```{r}
-
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(usdata)
+library(sf)
+library(leaflet)
+library(maps)
 ```
 
 ## **Part 1:** **Defining Research Question**
 
-Chosen Question:
+Chosen Question: Which regions have shown the fastest growth in renewable energy between 2021 and 2023? What is their EV registration growth in comparison?
 
 ## **Part 2: Data Preparation and Cleaning**
 
 ```{r}
+#loading data
+total_2021_raw <- read.csv("data/total-use-2021.csv")
+total_2022_raw <- read.csv("data/total-use-2022.csv")
+total_2023_raw <- read.csv("data/total-use-2023.csv")
+ev_reg_raw <- read.csv("data/ev-registrations-by-state-2023.csv") 
 
+#store original data
+ev_reg <- ev_reg_raw
+ev_reg <- tibble(ev_reg)
+total_2021 <- total_2021_raw
+total_2022 <- total_2022_raw
+total_2023 <- total_2023_raw
+
+#CLEANING ev-reg-2023
+#rename headers & clean head of data
+names(ev_reg)[1:2] <- c("state", "ev_registrations")
+ev_reg <- ev_reg[-c(1,2),]
+
+#clean data column to only digits
+ev_reg$ev_registrations <- as.numeric(str_remove_all(ev_reg$ev_registrations, "[^0-9]"))
+ev_reg$state <- state2abbr(ev_reg$state) #from usdata package, googled to find it
+
+#CLEANING total-use-2021, total-use-2022, total-use-2023
+total_2021$Energy_Source <- c("Coal", "Natural Gas", "Petroleum", "Nuclear Energy", "Renewable Energy")
+total_2022$Energy_Source <- c("Coal", "Natural Gas", "Petroleum", "Nuclear Energy", "Renewable Energy")
+total_2023$Energy_Source <- c("Coal", "Natural Gas", "Petroleum", "Nuclear Energy", "Renewable Energy")
 ```
 
 ## **Part 3: Joining / Pivoting Datasets for Analysis**
 
 ```{r}
+#pivot 2021,22, and 23 data
+total_2021 <- pivot_longer(total_2021, 
+cols = -Energy_Source, 
+names_to = "state",
+values_to = "energy_use") %>% 
+    mutate(year=2021)
+total_2022 <- pivot_longer(total_2022, 
+cols = -Energy_Source, 
+names_to = "state",
+values_to = "energy_use") %>% 
+    mutate(year=2022)
+total_2023 <- pivot_longer(total_2023, 
+cols = -Energy_Source, 
+names_to = "state",
+values_to = "energy_use") %>% 
+    mutate(year=2023)
+
+#joins
+energy_21_22 <- full_join(total_2021, total_2022,
+    by = c("Energy_Source", "state"),
+    suffix = c("_2021", "_2022"))
+energy_full <- 
+    full_join(energy_21_22, total_2023,
+    by = c("Energy_Source", "state"))
+
+#change energy_use to energy_use_2023
+energy_full <- rename(energy_full, energy_use_2023 = energy_use)
+
+#remove "years column (redundant)
+energy_full <- energy_full[,c(1,2,3,5,7)]
+```
+
+```{r}
+#FINAL ANALYSES w/ METRICS
+
+#total energy used
+energy_totals <- energy_full %>%
+  group_by(state) %>%
+  summarise(
+    total_2021 = sum(energy_use_2021, na.rm = TRUE),
+    total_2022 = sum(energy_use_2022, na.rm = TRUE),
+    total_2023 = sum(energy_use_2023, na.rm = TRUE)
+  )
+
+#total renewable energy by state
+renewable <- energy_full %>%
+  filter(Energy_Source == "Renewable Energy") %>%
+  select(state, renew_2021 = energy_use_2021, renew_2022 = energy_use_2022, renew_2023 = energy_use_2023)
+
+energy_percentages <- renewable %>%
+    left_join(energy_totals, by = "state") %>%
+    mutate(per_2021 = renew_2021 / total_2021,
+    per_2022 = renew_2022/total_2022,
+    per_2023 = renew_2023 / total_2023)
+energy_percentages <- energy_percentages[,c(1,8,9,10)]
+energy_percentages <- energy_percentages %>%
+    mutate(change_absolute = per_2023 - per_2021)
+
+data_combined <- energy_percentages %>%
+  left_join(ev_reg, by = "state") %>%
+  select("state","change_absolute","ev_registrations")
+
+```
+
+### **Heads of Cleaned, Pivoted & Combined (Final!) Tables**
+
+```{r}
+head(ev_reg)
+head(energy_full)
+head(energy_totals)
+head(energy_percentages)
+head(data_combined)
+```
+
+## **Relationship between Variables (Change in Renewable Energy % 2021-2023 and EV Registrations in 2023**
+```{r}
+#removed outliers (using rather coarse method, after graphing it once) and then graphing using ggplot
+ggplot(data_combined, aes(x = change_absolute, y = ev_registrations)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1, color = "red") + #trendline found in ggplot manual
+  labs(
+    title = "Relationship Between Renewable Energy Growth and EV Adoption (by State)",
+    x = "Change in Renewable Energy Share (2021–2023)",
+    y = "EV Registrations (2023)"
+  ) +
+  theme_minimal()
 
 ```
 
 ## **Part 4: Mapping Visualization**
 
 ```{r}
+#loading in sf boundaries
+us_states_sf <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE))
+
+#renaming & cleaning us_states_sf data
+us_states_sf <- us_states_sf %>%
+  rename(state = ID)
+
+us_states_sf$state <- state2abbr(us_states_sf$state)
+
+us_states_sf$state <- tolower(us_states_sf$state)
+
+#cleaning data (lowercase for mapping)
+map_data <- data_combined
+
+map_data$state <- tolower(map_data$state)
+
+#change us_states_sf to abbreviations
+map_final_data <- us_states_sf %>%
+    left_join(map_data, by = "state")
+
+#actual mapping
+ggplot(map_final_data) +
+  geom_sf(aes(fill = change_absolute), color = "white", linewidth = 0.2) +
+  scale_fill_gradient2(
+    low = "red",
+    mid = "white",
+    high = "darkgreen",
+    midpoint = 0,
+    limits = c(-0.05, 0.05), #limits the dominance of california in the graphic
+    name = "Change in\nRenewable Share"
+  ) +
+  labs(
+    title = "Change in Renewable Energy Share by State (2021–2023)",
+    caption = "Green = increase, Red = decrease"
+  ) +
+  theme_minimal() 
+
+ggplot(map_final_data) +
+  geom_sf(aes(fill = ev_registrations), color = "white", linewidth = 0.2) +
+  scale_fill_gradient2(
+    low = "red",
+    mid = "white",
+    high = "darkgreen",
+    midpoint = 0,
+    name = "EV Registrations in 2023") +
+  labs(
+    title = "EV Registrations in 2023",
+    caption = "Dark Green = High, White = low"
+  ) +
+  theme_minimal()
 
 ```
+
+## ANALYSIS 
+The first map visualizes how the share of renewable energy changed from states 2021-2023. States like California, Colorado grew in renewable energy, while states in the South and Midwest exhibit minimal change. However, if we compare this to the EV adoption map (Map #2), we see that these aren't necessarily aligned. The lack of alignment in these spatial patterns suggests that EV adoption doesn't necessarily have a strong relationship with change in renewable energy percentage change.
